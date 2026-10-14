@@ -35,7 +35,7 @@ name = "jaw"
 role = "jaw"
 kind = "gpio"
 pin = 6
-threshold = 0.35
+threshold = 0.7
 max_on = 2.0
 cool_down = 0.5
 
