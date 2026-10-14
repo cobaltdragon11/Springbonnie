@@ -8,10 +8,43 @@ wave_arm = "arm_right"
 wave_turn = 0.8
 wave_raise = 1.7
 wave_count = 3
-wave_swing = 0.5
+wave_swing = 0.3
 wave_fall = 1.7
 wave_cooldown = 15
 torso_invert = false
+bobble_when_speaking = false
+
+# Head: M4 is the supply (-1.0 turns it on); a transistor per actuator switches it from a Pi pin.
+[[part]]
+name = "head power"
+role = "headpower"
+kind = "dc"
+motor = 4
+max_throttle = 1.0
+max_on = 1000000.0
+
+[[part]]
+name = "eyes"
+role = "glow"
+kind = "gpio"
+pin = 5
+threshold = 0.5
+
+[[part]]
+name = "jaw"
+role = "jaw"
+kind = "gpio"
+pin = 6
+threshold = 0.35
+max_on = 2.0
+cool_down = 0.5
+
+[[part]]
+name = "head bobble"
+role = "bobble"
+kind = "gpio"
+pin = 12
+threshold = 0.5
 
 [[part]]
 name = "right arm"

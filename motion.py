@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # Python older than 3.11
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = 1
 SERVO_CHANNELS = (0, 1, 14, 15)   # the "xtra PWM" pins on the Motor HAT
-ROLES = ('jaw', 'pan', 'tilt', 'eyes_x', 'eyes_y', 'glow', 'gesture', 'torso', 'arm_right', 'arm_left')
+ROLES = ('jaw', 'pan', 'tilt', 'eyes_x', 'eyes_y', 'glow', 'gesture', 'torso', 'arm_right', 'arm_left', 'bobble', 'headpower')
 
 
 def clamp(v, lo, hi):
@@ -57,6 +57,7 @@ DEFAULT_MOTION = {
     'twitch_every': [7, 18],   # seconds between twitches (random in this range)
     'idle_without_page': False,  # keep moving when the web page isn't connected
     'rest_after': 30,          # seconds without the page before he goes still
+    'bobble_when_speaking': False,   # head bobble runs the whole time he talks (otherwise only on laugh, taunt, arrive, nod)
     'wave_arm': 'arm_right',   # which arm waves when someone leaves (arm_right or arm_left)
     'wave_cooldown': 15,       # seconds before he will wave again
     'wave_turn': 0.8,          # seconds the torso turns toward where the person left (and the same to come back)
@@ -174,6 +175,22 @@ class _MockStepper:
 
 class _MockStepperLib:
     FORWARD, BACKWARD, SINGLE, DOUBLE, INTERLEAVE, MICROSTEP = 1, 2, 1, 2, 3, 4
+
+
+class _MockGpio:
+    def __init__(self, rec, pin):
+        self.rec, self.pin, self.value = rec, pin, False
+
+    def on(self):
+        self.value = True
+        self.rec.append(('gpio', self.pin, True, time.monotonic()))
+
+    def off(self):
+        self.value = False
+        self.rec.append(('gpio', self.pin, False, time.monotonic()))
+
+    def close(self):
+        pass
 
 
 class MockBoard:
@@ -435,7 +452,60 @@ class LedPart(Part):
                 pass
 
 
-KINDS = {'servo': ServoPart, 'stepper': StepperPart, 'dc': DCPart, 'led': LedPart}
+class GpioPart(Part):
+    """An on/off actuator switched by a transistor on a Pi pin (eyes, jaw, head bobble).
+    It is on while its position is above `threshold` (with a little hysteresis so it doesn't chatter).
+    The head's supply (a DC part on M4 at -1.0) must be running for it to do anything."""
+    kind = 'gpio'
+
+    def __init__(self, cfg, board):
+        super().__init__(cfg)
+        self.pin = int(cfg['pin'])
+        self.on_above = float(cfg.get('threshold', 0.5))
+        self.off_below = self.on_above * float(cfg.get('hysteresis', 0.6))
+        self.max_on = float(cfg.get('max_on', 0))          # 0 = no limit; otherwise never stay on longer than this
+        self.cool = float(cfg.get('cool_down', 0.5))
+        if board.mock:
+            self.dev = _MockGpio(board.rec, self.pin)
+        else:
+            from gpiozero import OutputDevice
+            self.dev = OutputDevice(self.pin, active_high=not cfg.get('invert', False), initial_value=False)
+        self.out = False
+        self.on_since = None
+        self.cool_until = 0.0
+
+    def drive(self, pos, dt):
+        now = time.monotonic()
+        want = pos > (self.off_below if self.out else self.on_above)
+        if want and now < self.cool_until:
+            want = False
+        if want and self.max_on > 0:
+            if self.on_since is None:
+                self.on_since = now
+            elif now - self.on_since > self.max_on:
+                self.cool_until = now + self.cool
+                want = False
+        if not want:
+            self.on_since = None
+        if want != self.out:
+            self.dev.on() if want else self.dev.off()
+            self.out = want
+
+    def rest(self):
+        self.dev.off()
+        self.out = False
+        self.on_since = None
+
+    def release(self):
+        try:
+            self.dev.off()
+            self.dev.close()
+        except Exception:
+            pass
+        self.out = False
+
+
+KINDS = {'servo': ServoPart, 'stepper': StepperPart, 'dc': DCPart, 'led': LedPart, 'gpio': GpioPart}
 
 
 def build_parts(cfg, board):
@@ -582,12 +652,13 @@ class Engine:
             a = 0.3
         if arm_on:
             r.append((arm, a, a + rise, -1.0))          # raise (negative throttle = up)
-            a += rise + 0.15
-            for _ in range(n):                          # wave: a little down, a little up
-                r.append((arm, a, a + sw, 1.0))
-                a += sw + 0.05
-                r.append((arm, a, a + sw, -1.0))
-                a += sw + 0.05
+            a += rise + 0.03
+            for i in range(n):                          # wave: a little down, a little up
+                dip = sw * 0.5 if i == 0 else sw              # the first dip is short: the arm still has momentum from the raise
+                r.append((arm, a, a + dip, 1.0))
+                a += dip + 0.03
+                r.append((arm, a, a + sw * 1.15, -1.0))   # a little longer going up: gravity helped the dip
+                a += sw * 1.15 + 0.03
             a += 0.3
             a += float(m['wave_fall'])                  # lower: motor off, the arm drops under its own weight
         if torso_on:
@@ -704,6 +775,9 @@ class Engine:
             elif self.twitch:
                 gm = 1.0
             pos['gesture'] = gm
+            # head: M4 supplies the actuators; the bobble runs on the livelier gestures
+            pos['headpower'] = -1.0
+            pos['bobble'] = 1.0 if (gname in ('laugh', 'taunt', 'arrive', 'nod') or (m['bobble_when_speaking'] and self.state == 'speaking')) else 0.0
 
             if self.routine:
                 if now >= self.routine_end:
