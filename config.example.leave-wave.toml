@@ -1,0 +1,36 @@
+# Bench-tested 2026-10-13. M1/M2: negative throttle = arm up. M3: positive = torso toward his left.
+[board]
+address = 0x60
+
+[motion]
+port = 8765
+wave_arm = "arm_right"
+wave_turn = 0.8
+wave_raise = 1.0
+wave_count = 3
+wave_cooldown = 15
+torso_invert = false
+
+[[part]]
+name = "right arm"
+role = "arm_right"
+kind = "dc"
+motor = 1
+max_throttle = 0.6
+max_on = 2.5
+
+[[part]]
+name = "left arm"
+role = "arm_left"
+kind = "dc"
+motor = 2
+max_throttle = 0.6
+max_on = 2.5
+
+[[part]]
+name = "torso"
+role = "torso"
+kind = "dc"
+motor = 3
+max_throttle = 0.5
+max_on = 2.5

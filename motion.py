@@ -33,7 +33,7 @@ except ModuleNotFoundError:  # Python older than 3.11
 HERE = os.path.dirname(os.path.abspath(__file__))
 VERSION = 1
 SERVO_CHANNELS = (0, 1, 14, 15)   # the "xtra PWM" pins on the Motor HAT
-ROLES = ('jaw', 'pan', 'tilt', 'eyes_x', 'eyes_y', 'glow', 'gesture')
+ROLES = ('jaw', 'pan', 'tilt', 'eyes_x', 'eyes_y', 'glow', 'gesture', 'torso', 'arm_right', 'arm_left')
 
 
 def clamp(v, lo, hi):
@@ -57,6 +57,12 @@ DEFAULT_MOTION = {
     'twitch_every': [7, 18],   # seconds between twitches (random in this range)
     'idle_without_page': False,  # keep moving when the web page isn't connected
     'rest_after': 30,          # seconds without the page before he goes still
+    'wave_arm': 'arm_right',   # which arm waves when someone leaves (arm_right or arm_left)
+    'wave_cooldown': 15,       # seconds before he will wave again
+    'wave_turn': 0.8,          # seconds the torso turns toward where the person left (and the same to come back)
+    'wave_raise': 1.0,         # seconds the arm takes to rise (and the same to lower)
+    'wave_count': 3,           # how many waves
+    'torso_invert': False,     # flip if the torso turns away from where the person left
 }
 
 
@@ -462,6 +468,10 @@ class Engine:
         self.live = (0.0, 0.0)          # (value, time)
         self.gesture = None             # (name, start, duration)
         self.tests = {}                 # role -> (pos, until)
+        self.routine = []               # scripted moves: (role, start, end, pos)
+        self.routine_end = 0.0
+        self.last_wave = -1e9
+        self.seen_x = None              # where the person was when we last saw them
         self.clients = 0
         self.alone_since = now
         self.resting = False
@@ -498,8 +508,11 @@ class Engine:
             elif t == 'look':
                 x = msg.get('x')
                 if x is None:
+                    if self.look is not None and now - self.look[2] < 2.5:
+                        self._maybe_wave(now, self.look[0])   # someone was there and has gone
                     self.look = None
                 else:
+                    self.seen_x = float(x)
                     self.look = (clamp(float(x), -1.0, 1.0), clamp(float(msg.get('y', 0) or 0), -1.0, 1.0), now)
             elif t == 'state':
                 s = str(msg.get('state', 'idle'))
@@ -513,6 +526,8 @@ class Engine:
                 dur = {'laugh': 2.2, 'taunt': 2.5, 'arrive': 0.6, 'leave': 1.5, 'nod': 1.4, 'center': 2.0, 'twitch': 0.5}.get(name, 1.0)
                 dur = clamp(float(msg.get('duration', dur)), 0.2, 8.0)
                 self.gesture = (name, now, dur)
+                if name == 'leave':
+                    self._maybe_wave(now, self.look[0] if self.look else self.seen_x)
                 if name == 'twitch':
                     self._start_twitch(now)
             elif t == 'test':
@@ -540,6 +555,47 @@ class Engine:
     def _start_twitch(self, now):
         self.twitch = (random.choice((-1, 1)) * random.uniform(0.12, 0.25), random.uniform(-0.12, 0.12), now + random.uniform(0.08, 0.16))
         self.next_twitch = now + random.uniform(*self.m['twitch_every'])
+
+    def _maybe_wave(self, now, x):
+        """Someone left: turn the torso toward where they went and wave one arm, then undo it all.
+        Every move has an equal and opposite move, so the body ends where it started."""
+        m = self.m
+        roles = {p.role for p in self.parts}
+        arm = m['wave_arm']
+        torso_on, arm_on = 'torso' in roles, arm in roles
+        if not (torso_on or arm_on):
+            return
+        if now < self.routine_end or now - self.last_wave < m['wave_cooldown']:
+            return
+        turn, rise, n = float(m['wave_turn']), float(m['wave_raise']), int(m['wave_count'])
+        if x is None:
+            x = random.choice((-1.0, 1.0))
+        s = 1.0 if x < 0 else -1.0          # positive torso throttle turns toward his left (x = -1)
+        if m['torso_invert']:
+            s = -s
+        r, a = [], 0.0
+        if torso_on:
+            r.append(('torso', 0.0, turn, s))
+            a = 0.3
+        if arm_on:
+            r.append((arm, a, a + rise, -1.0))          # raise (negative throttle = up)
+            a += rise + 0.15
+            for _ in range(n):                          # wave: a little down, a little up
+                r.append((arm, a, a + 0.2, 1.0))
+                a += 0.25
+                r.append((arm, a, a + 0.2, -1.0))
+                a += 0.25
+            a += 0.3
+            r.append((arm, a, a + rise, 1.0))           # lower
+            a += rise
+        if torso_on:
+            a = max(a, turn) + 0.2
+            r.append(('torso', a, a + turn, -s))        # turn back
+            a += turn
+        self.routine = [(role, now + t0, now + t1, v) for role, t0, t1, v in r]
+        self.routine_end = now + a
+        self.last_wave = now
+        log('someone left: waving (%s) and turning the torso' % arm)
 
     # -- positions
     def _jaw_target(self, now):
@@ -647,6 +703,12 @@ class Engine:
                 gm = 1.0
             pos['gesture'] = gm
 
+            if self.routine:
+                if now >= self.routine_end:
+                    self.routine = []
+                for role, t0, t1, v in self.routine:
+                    if t0 <= now < t1:
+                        pos[role] = v
             for role, (p, until) in list(self.tests.items()):
                 if now < until:
                     pos[role] = p
