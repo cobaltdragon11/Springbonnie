@@ -62,6 +62,8 @@ DEFAULT_MOTION = {
     'wave_turn': 0.8,          # seconds the torso turns toward where the person left (and the same to come back)
     'wave_raise': 1.0,         # seconds the arm takes to rise (and the same to lower)
     'wave_count': 3,           # how many waves
+    'wave_fall': 1.5,          # seconds the arm is left to drop under its own weight after the wave
+    'wave_swing': 0.3,         # seconds for each down and up swing of the wave
     'torso_invert': False,     # flip if the torso turns away from where the person left
 }
 
@@ -568,6 +570,7 @@ class Engine:
         if now < self.routine_end or now - self.last_wave < m['wave_cooldown']:
             return
         turn, rise, n = float(m['wave_turn']), float(m['wave_raise']), int(m['wave_count'])
+        sw = float(m['wave_swing'])
         if x is None:
             x = random.choice((-1.0, 1.0))
         s = 1.0 if x < 0 else -1.0          # positive torso throttle turns toward his left (x = -1)
@@ -581,13 +584,12 @@ class Engine:
             r.append((arm, a, a + rise, -1.0))          # raise (negative throttle = up)
             a += rise + 0.15
             for _ in range(n):                          # wave: a little down, a little up
-                r.append((arm, a, a + 0.2, 1.0))
-                a += 0.25
-                r.append((arm, a, a + 0.2, -1.0))
-                a += 0.25
+                r.append((arm, a, a + sw, 1.0))
+                a += sw + 0.05
+                r.append((arm, a, a + sw, -1.0))
+                a += sw + 0.05
             a += 0.3
-            r.append((arm, a, a + rise, 1.0))           # lower
-            a += rise
+            a += float(m['wave_fall'])                  # lower: motor off, the arm drops under its own weight
         if torso_on:
             a = max(a, turn) + 0.2
             r.append(('torso', a, a + turn, -s))        # turn back
